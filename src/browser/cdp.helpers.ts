@@ -1,7 +1,8 @@
+import { Agent } from "undici";
 import WebSocket from "ws";
 import { isLoopbackHost } from "../gateway/net.js";
 import { rawDataToString } from "../infra/ws.js";
-import { getDirectAgentForCdp, withNoProxyForCdpUrl } from "./cdp-proxy-bypass.js";
+import { getDirectAgentForCdp } from "./cdp-proxy-bypass.js";
 import { CDP_HTTP_REQUEST_TIMEOUT_MS, CDP_WS_HANDSHAKE_TIMEOUT_MS } from "./cdp-timeouts.js";
 import { resolveBrowserRateLimitMessage } from "./client-fetch.js";
 import { getChromeExtensionRelayAuthHeaders } from "./extension-relay.js";
@@ -169,9 +170,16 @@ export async function fetchCdpChecked(
   const t = setTimeout(ctrl.abort.bind(ctrl), timeoutMs);
   try {
     const headers = getHeadersWithAuth(url, (init?.headers as Record<string, string>) || {});
-    const res = await withNoProxyForCdpUrl(url, () =>
-      fetch(url, { ...init, headers, signal: ctrl.signal }),
-    );
+    // Use a direct undici Agent to bypass the global EnvHttpProxyAgent.
+    // CDP connections are always to local or container-network endpoints
+    // and must never be routed through an HTTP proxy.
+    const { fetch: undiciFetch } = await import("undici");
+    const res = (await undiciFetch(url, {
+      ...init,
+      headers,
+      signal: ctrl.signal,
+      dispatcher: new Agent(),
+    } as Parameters<typeof undiciFetch>[1])) as unknown as Response;
     if (!res.ok) {
       if (res.status === 429) {
         // Do not reflect upstream response text into the error surface (log/agent injection risk)
