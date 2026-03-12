@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { Agent, fetch as undiciFetch } from "undici";
 import { startBrowserBridgeServer, stopBrowserBridgeServer } from "../../browser/bridge-server.js";
 import { type ResolvedBrowserConfig, resolveProfile } from "../../browser/config.js";
 import {
@@ -50,7 +51,11 @@ async function waitForSandboxCdp(params: {
       const ctrl = new AbortController();
       const t = setTimeout(ctrl.abort.bind(ctrl), 1000);
       try {
-        const res = await fetch(url, { signal: ctrl.signal });
+        // Use undici fetch with a direct Agent to bypass the global
+        // EnvHttpProxyAgent dispatcher. The sandbox browser is on a local
+        // container network (e.g. 10.89.x.x) and must not be routed
+        // through HTTP_PROXY.
+        const res = await undiciFetch(url, { signal: ctrl.signal, dispatcher: new Agent() });
         if (res.ok) {
           return true;
         }
