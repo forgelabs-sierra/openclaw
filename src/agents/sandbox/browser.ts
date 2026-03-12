@@ -103,6 +103,12 @@ function buildSandboxBrowserResolvedConfig(params: {
         color: DEFAULT_OPENCLAW_BROWSER_COLOR,
       },
     },
+    // The sandbox browser runs on a trusted container network.  Allow
+    // private-network navigation so the SSRF guard does not block when
+    // the gateway process has HTTP_PROXY / HTTPS_PROXY env vars set
+    // (it cannot DNS-pin through a proxy, but the browser itself is
+    // isolated in its own container).
+    ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
   };
 }
 
