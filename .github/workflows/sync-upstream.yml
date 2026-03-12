@@ -1,0 +1,192 @@
+name: Sync Upstream
+
+# Syncs the forgelabs patch branch with upstream openclaw/openclaw main.
+# Runs weekly and can be triggered manually. If the merge is clean and tests
+# pass, the updated branch is pushed automatically. On conflict or test
+# failure, an issue is opened for manual resolution.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Every Monday 06:00 UTC (7pm NZDT)
+  workflow_dispatch:       # Manual trigger from GitHub UI
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    if: github.repository == 'forgelabs-sierra/openclaw'
+
+    steps:
+      - name: Checkout forgelabs branch
+        uses: actions/checkout@v4
+        with:
+          ref: forgelabs
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/openclaw/openclaw.git
+
+      - name: Fetch upstream
+        run: git fetch upstream main
+
+      - name: Check for new commits
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count forgelabs..upstream/main)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Forgelabs branch is $BEHIND commits behind upstream/main"
+
+      - name: Merge upstream
+        if: steps.check.outputs.behind != '0'
+        id: merge
+        run: |
+          if git merge upstream/main --no-edit; then
+            echo "status=clean" >> "$GITHUB_OUTPUT"
+
+            # Check if our patches still differ from upstream
+            PATCH_DIFF=$(git diff upstream/main -- src/agents/sandbox/browser.ts src/agents/sandbox/docker.ts | wc -l)
+            echo "patch_diff_lines=$PATCH_DIFF" >> "$GITHUB_OUTPUT"
+
+            if [ "$PATCH_DIFF" -eq 0 ]; then
+              echo "patches_needed=false" >> "$GITHUB_OUTPUT"
+              echo "All patches have been merged upstream!"
+            else
+              echo "patches_needed=true" >> "$GITHUB_OUTPUT"
+              echo "Patches still diverge from upstream ($PATCH_DIFF diff lines)"
+            fi
+          else
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
+
+      - name: Setup Node.js
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.status == 'clean'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.status == 'clean'
+        run: npm install
+
+      - name: Run tests
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.status == 'clean'
+        id: test
+        run: |
+          if npm test; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push merged branch
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.status == 'clean' && steps.test.outputs.status == 'pass'
+        run: git push origin forgelabs
+
+      - name: Open issue on merge conflict
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.status == 'conflict'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const behind = '${{ steps.check.outputs.behind }}';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Upstream sync: merge conflict (${behind} commits behind)`,
+              body: [
+                '## Upstream Sync Failed — Merge Conflict',
+                '',
+                `The \`forgelabs\` branch is **${behind} commits** behind \`upstream/main\` and cannot be merged automatically.`,
+                '',
+                '### Resolution',
+                '',
+                '```bash',
+                'cd ~/forgelabs/projects/fl/ai/openclaw-forgelabs',
+                'git fetch upstream',
+                'git checkout forgelabs',
+                'git merge upstream/main',
+                '# Resolve conflicts in the listed files',
+                'git add <resolved-files>',
+                'git merge --continue',
+                'npm test',
+                'git push origin forgelabs',
+                '```',
+                '',
+                'Then rebuild the gateway:',
+                '```bash',
+                'cd ~/forgelabs/projects/fl/ai/openclaw-podman',
+                'podman compose build openclaw',
+                'podman compose down openclaw && podman compose up -d openclaw',
+                '```',
+                '',
+                'See: `quicknotes/quicknote_20260312_221200_openclaw-fork-patching-guide.md`',
+              ].join('\n'),
+              labels: ['upstream-sync'],
+            });
+
+      - name: Open issue on test failure
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.status == 'clean' && steps.test.outputs.status == 'fail'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const behind = '${{ steps.check.outputs.behind }}';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Upstream sync: tests failed after merge (${behind} commits)`,
+              body: [
+                '## Upstream Sync — Tests Failed',
+                '',
+                `Merged **${behind} commits** from \`upstream/main\` into \`forgelabs\` cleanly, but tests failed.`,
+                '',
+                'The merge has **not** been pushed. The `forgelabs` branch is unchanged.',
+                '',
+                '### Resolution',
+                '',
+                '```bash',
+                'cd ~/forgelabs/projects/fl/ai/openclaw-forgelabs',
+                'git fetch upstream',
+                'git checkout forgelabs',
+                'git merge upstream/main',
+                'npm install',
+                'npm test',
+                '# Fix any test failures',
+                'git push origin forgelabs',
+                '```',
+                '',
+                'See: `quicknotes/quicknote_20260312_221200_openclaw-fork-patching-guide.md`',
+              ].join('\n'),
+              labels: ['upstream-sync'],
+            });
+
+      - name: Open issue when patches merged upstream
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.status == 'clean' && steps.test.outputs.status == 'pass' && steps.merge.outputs.patches_needed == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'All patches merged upstream — fork may no longer be needed',
+              body: [
+                '## Patches Merged Upstream',
+                '',
+                'After syncing with `upstream/main`, the `forgelabs` branch has **no diff** in the patched files:',
+                '- `src/agents/sandbox/browser.ts`',
+                '- `src/agents/sandbox/docker.ts`',
+                '',
+                'This means all our patches have been merged upstream. Consider switching back to `npm install -g openclaw@latest` in `Dockerfile.openclaw`.',
+                '',
+                'See: `quicknotes/quicknote_20260312_221200_openclaw-fork-patching-guide.md` (Reverting to Upstream section)',
+              ].join('\n'),
+              labels: ['upstream-sync'],
+            });
