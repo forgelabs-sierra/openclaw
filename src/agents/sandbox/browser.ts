@@ -38,9 +38,13 @@ import { appendWorkspaceMountArgs } from "./workspace-mounts.js";
 const HOT_BROWSER_WINDOW_MS = 5 * 60 * 1000;
 const CDP_SOURCE_RANGE_ENV_KEY = "OPENCLAW_BROWSER_CDP_SOURCE_RANGE";
 
-async function waitForSandboxCdp(params: { cdpPort: number; timeoutMs: number }): Promise<boolean> {
+async function waitForSandboxCdp(params: {
+  cdpHost?: string;
+  cdpPort: number;
+  timeoutMs: number;
+}): Promise<boolean> {
   const deadline = Date.now() + Math.max(0, params.timeoutMs);
-  const url = `http://127.0.0.1:${params.cdpPort}/json/version`;
+  const url = `http://${params.cdpHost || "127.0.0.1"}:${params.cdpPort}/json/version`;
   while (Date.now() < deadline) {
     try {
       const ctrl = new AbortController();
@@ -63,11 +67,12 @@ async function waitForSandboxCdp(params: { cdpPort: number; timeoutMs: number })
 
 function buildSandboxBrowserResolvedConfig(params: {
   controlPort: number;
+  cdpHost?: string;
   cdpPort: number;
   headless: boolean;
   evaluateEnabled: boolean;
 }): ResolvedBrowserConfig {
-  const cdpHost = "127.0.0.1";
+  const cdpHost = params.cdpHost || "127.0.0.1";
   const cdpPortRange = deriveDefaultBrowserCdpPortRange(params.controlPort);
   return {
     enabled: true,
@@ -75,7 +80,7 @@ function buildSandboxBrowserResolvedConfig(params: {
     controlPort: params.controlPort,
     cdpProtocol: "http",
     cdpHost,
-    cdpIsLoopback: true,
+    cdpIsLoopback: cdpHost === "127.0.0.1",
     cdpPortRangeStart: cdpPortRange.start,
     cdpPortRangeEnd: cdpPortRange.end,
     remoteCdpTimeoutMs: 1500,
@@ -277,6 +282,25 @@ export async function ensureSandboxBrowser(params: {
     throw new Error(`Failed to resolve CDP port mapping for ${containerName}.`);
   }
 
+  // Resolve the browser container's internal IP for containerized gateway deployments.
+  // When the gateway itself runs inside a container, 127.0.0.1:<host-mapped-port> is
+  // unreachable. Instead, connect directly via the container network IP on the internal port.
+  let sbxCdpHost = "127.0.0.1";
+  let sbxCdpPort = mappedCdp;
+  try {
+    const ipResult = await execDocker(
+      ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", containerName],
+      { allowFailure: true },
+    );
+    const ip = ipResult.code === 0 ? ipResult.stdout.trim() : "";
+    if (ip && ip !== "<no value>") {
+      sbxCdpHost = ip;
+      sbxCdpPort = params.cfg.browser.cdpPort;
+    }
+  } catch {
+    // Fall back to 127.0.0.1 + host-mapped port
+  }
+
   const mappedNoVnc = noVncEnabled
     ? await readDockerPort(containerName, params.cfg.browser.noVncPort)
     : null;
@@ -336,12 +360,13 @@ export async function ensureSandboxBrowser(params: {
             await execDocker(["start", containerName]);
           }
           const ok = await waitForSandboxCdp({
-            cdpPort: mappedCdp,
+            cdpHost: sbxCdpHost,
+            cdpPort: sbxCdpPort,
             timeoutMs: params.cfg.browser.autoStartTimeoutMs,
           });
           if (!ok) {
             throw new Error(
-              `Sandbox browser CDP did not become reachable on 127.0.0.1:${mappedCdp} within ${params.cfg.browser.autoStartTimeoutMs}ms.`,
+              `Sandbox browser CDP did not become reachable on ${sbxCdpHost}:${sbxCdpPort} within ${params.cfg.browser.autoStartTimeoutMs}ms.`,
             );
           }
         }
@@ -350,7 +375,8 @@ export async function ensureSandboxBrowser(params: {
     return await startBrowserBridgeServer({
       resolved: buildSandboxBrowserResolvedConfig({
         controlPort: 0,
-        cdpPort: mappedCdp,
+        cdpHost: sbxCdpHost,
+        cdpPort: sbxCdpPort,
         headless: params.cfg.browser.headless,
         evaluateEnabled: params.evaluateEnabled ?? DEFAULT_BROWSER_EVALUATE_ENABLED,
       }),

@@ -241,6 +241,23 @@ export async function readDockerPort(containerName: string, port: number) {
   return Number.isFinite(mapped) ? mapped : null;
 }
 
+export async function readDockerContainerIp(
+  containerName: string,
+  network?: string,
+): Promise<string | null> {
+  const format = network
+    ? `{{(index .NetworkSettings.Networks "${network}").IPAddress}}`
+    : "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}";
+  const result = await execDocker(["inspect", "-f", format, containerName], {
+    allowFailure: true,
+  });
+  if (result.code !== 0) {
+    return null;
+  }
+  const ip = result.stdout.trim();
+  return ip && ip !== "<no value>" ? ip : null;
+}
+
 async function dockerImageExists(image: string) {
   const result = await execDocker(["image", "inspect", image], {
     allowFailure: true,
