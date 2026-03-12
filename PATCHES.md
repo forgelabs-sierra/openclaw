@@ -22,18 +22,21 @@ Treated `0.0.0.0` and `[::]` as wildcard bind addresses in CDP WebSocket URL nor
 
 **Fix (Part B — HTTP proxy bypass):** OpenClaw sets a global `EnvHttpProxyAgent` dispatcher (for `HTTP_PROXY`/`HTTPS_PROXY` support). This causes all `fetch()` calls — including CDP health checks and reachability probes to container-network IPs (e.g. `10.89.x.x`) — to be routed through the HTTP proxy (squid), which cannot reach those IPs. The fix uses a direct `undici.Agent` dispatcher for CDP fetch calls, bypassing the global proxy entirely. The existing `withNoProxyForCdpUrl` mechanism only handles loopback addresses and `NO_PROXY` with `EnvHttpProxyAgent` does not support CIDR notation (`10.89.0.0/16` is silently ignored).
 
+**Fix (Part C — SSRF navigation policy):** The sandbox browser's `ResolvedBrowserConfig` was missing `ssrfPolicy`, so it defaulted to `undefined`. The navigation guard in `navigation-guard.ts` blocks all URL navigation when `HTTP_PROXY`/`HTTPS_PROXY` env vars are present and `isPrivateNetworkAllowedByPolicy(ssrfPolicy)` returns `false` — which it does when `ssrfPolicy` is `undefined`. The fix adds `ssrfPolicy: { dangerouslyAllowPrivateNetwork: true }` to the sandbox browser's resolved config, since the browser runs in an isolated container on a trusted network.
+
 **Backward compatible:** Falls back to `127.0.0.1` + host-mapped port if `docker inspect` fails (e.g. when the gateway runs directly on the host). The proxy bypass is safe for all environments since CDP connections are always to local or container-network endpoints.
 
 ### Files changed
 
-| File                            | Change                                                                                     |
-| ------------------------------- | ------------------------------------------------------------------------------------------ |
-| `src/agents/sandbox/browser.ts` | `waitForSandboxCdp()` — added `cdpHost` parameter                                          |
-| `src/agents/sandbox/browser.ts` | `buildSandboxBrowserResolvedConfig()` — added `cdpHost` parameter, dynamic `cdpIsLoopback` |
-| `src/agents/sandbox/browser.ts` | `ensureSandboxBrowser()` — resolves container IP after `readDockerPort()`                  |
-| `src/agents/sandbox/browser.ts` | `waitForSandboxCdp()` — use direct `undici.Agent` dispatcher to bypass HTTP proxy          |
-| `src/agents/sandbox/docker.ts`  | Added `readDockerContainerIp()` helper                                                     |
-| `src/browser/cdp.helpers.ts`    | `fetchCdpChecked()` — use direct `undici.Agent` dispatcher to bypass HTTP proxy            |
+| File                            | Change                                                                                               |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `src/agents/sandbox/browser.ts` | `waitForSandboxCdp()` — added `cdpHost` parameter                                                    |
+| `src/agents/sandbox/browser.ts` | `buildSandboxBrowserResolvedConfig()` — added `cdpHost` parameter, dynamic `cdpIsLoopback`           |
+| `src/agents/sandbox/browser.ts` | `ensureSandboxBrowser()` — resolves container IP after `readDockerPort()`                            |
+| `src/agents/sandbox/browser.ts` | `waitForSandboxCdp()` — use direct `undici.Agent` dispatcher to bypass HTTP proxy                    |
+| `src/agents/sandbox/browser.ts` | `buildSandboxBrowserResolvedConfig()` — add `ssrfPolicy` with `dangerouslyAllowPrivateNetwork: true` |
+| `src/agents/sandbox/docker.ts`  | Added `readDockerContainerIp()` helper                                                               |
+| `src/browser/cdp.helpers.ts`    | `fetchCdpChecked()` — use direct `undici.Agent` dispatcher to bypass HTTP proxy                      |
 
 ### Use case
 
