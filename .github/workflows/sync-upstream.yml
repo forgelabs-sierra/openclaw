@@ -1,6 +1,7 @@
 name: Sync Upstream
 
-# Syncs the forgelabs patch branch with upstream openclaw/openclaw main.
+# Syncs the forgelabs patch branch with the latest stable upstream release tag.
+# Tracks release tags (v*) instead of main to avoid bleeding-edge regressions.
 # Runs weekly and can be triggered manually. If the merge is clean and tests
 # pass, the updated branch is pushed automatically. On conflict or test
 # failure, an issue is opened for manual resolution.
@@ -35,25 +36,39 @@ jobs:
       - name: Add upstream remote
         run: git remote add upstream https://github.com/openclaw/openclaw.git
 
-      - name: Fetch upstream
-        run: git fetch upstream main
+      - name: Fetch upstream tags and branches
+        run: git fetch upstream --tags
+
+      - name: Find latest stable release tag
+        id: release
+        run: |
+          # Get the latest v* tag (stable release), sorted by version
+          LATEST_TAG=$(git tag -l 'v*' --sort=-version:refname | grep -v 'beta\|rc\|alpha' | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No stable release tags found"
+            exit 1
+          fi
+          echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "Latest stable release: $LATEST_TAG"
 
       - name: Check for new commits
         id: check
         run: |
-          BEHIND=$(git rev-list --count forgelabs..upstream/main)
+          LATEST_TAG="${{ steps.release.outputs.tag }}"
+          BEHIND=$(git rev-list --count "forgelabs..$LATEST_TAG")
           echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
-          echo "Forgelabs branch is $BEHIND commits behind upstream/main"
+          echo "Forgelabs branch is $BEHIND commits behind $LATEST_TAG"
 
       - name: Merge upstream
         if: steps.check.outputs.behind != '0'
         id: merge
         run: |
-          if git merge upstream/main --no-edit; then
+          LATEST_TAG="${{ steps.release.outputs.tag }}"
+          if git merge "$LATEST_TAG" --no-edit -m "Sync with upstream $LATEST_TAG"; then
             echo "status=clean" >> "$GITHUB_OUTPUT"
 
             # Check if our patches still differ from upstream
-            PATCH_DIFF=$(git diff upstream/main -- src/agents/sandbox/browser.ts src/agents/sandbox/docker.ts | wc -l)
+            PATCH_DIFF=$(git diff ${{ steps.release.outputs.tag }} -- src/agents/sandbox/browser.ts src/agents/sandbox/docker.ts | wc -l)
             echo "patch_diff_lines=$PATCH_DIFF" >> "$GITHUB_OUTPUT"
 
             if [ "$PATCH_DIFF" -eq 0 ]; then
@@ -105,7 +120,7 @@ jobs:
               body: [
                 '## Upstream Sync Failed — Merge Conflict',
                 '',
-                `The \`forgelabs\` branch is **${behind} commits** behind \`upstream/main\` and cannot be merged automatically.`,
+                `The \`forgelabs\` branch is **${behind} commits** behind \`${{ steps.release.outputs.tag }}\` and cannot be merged automatically.`,
                 '',
                 '### Resolution',
                 '',
@@ -113,7 +128,7 @@ jobs:
                 'cd ~/forgelabs/projects/fl/ai/openclaw-forgelabs',
                 'git fetch upstream',
                 'git checkout forgelabs',
-                'git merge upstream/main',
+                'git merge ${{ steps.release.outputs.tag }}',
                 '# Resolve conflicts in the listed files',
                 'git add <resolved-files>',
                 'git merge --continue',
@@ -146,7 +161,7 @@ jobs:
               body: [
                 '## Upstream Sync — Tests Failed',
                 '',
-                `Merged **${behind} commits** from \`upstream/main\` into \`forgelabs\` cleanly, but tests failed.`,
+                `Merged **${behind} commits** from \`${{ steps.release.outputs.tag }}\` into \`forgelabs\` cleanly, but tests failed.`,
                 '',
                 'The merge has **not** been pushed. The `forgelabs` branch is unchanged.',
                 '',
@@ -156,7 +171,7 @@ jobs:
                 'cd ~/forgelabs/projects/fl/ai/openclaw-forgelabs',
                 'git fetch upstream',
                 'git checkout forgelabs',
-                'git merge upstream/main',
+                'git merge ${{ steps.release.outputs.tag }}',
                 'npm install',
                 'npm test',
                 '# Fix any test failures',
@@ -180,7 +195,7 @@ jobs:
               body: [
                 '## Patches Merged Upstream',
                 '',
-                'After syncing with `upstream/main`, the `forgelabs` branch has **no diff** in the patched files:',
+                'After syncing with `${{ steps.release.outputs.tag }}`, the `forgelabs` branch has **no diff** in the patched files:',
                 '- `src/agents/sandbox/browser.ts`',
                 '- `src/agents/sandbox/docker.ts`',
                 '',
